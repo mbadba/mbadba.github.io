@@ -1,0 +1,165 @@
+---
+title: "Human Activity Recognition: Evaluating Execution Quality of Weight Lifting Exercises"
+author: "mbadba"
+date: "Saturday, November 22, 2014"
+output: html_document
+---
+##Executive Summary
+This project addresses the feasibility of using machine learning to assess the quality of execution of weight lifting exercises. A predictive model based on Random Forests with Principal Component Analysis preprocessing was constructed to analyze accelerometer data collected during the executiong of Unilateral Dumbbell Biceps Curls. The model achieved a 95% level of accuracy on out of sample data, which suggests that it should be possible to use this model to detect whether weight lifting exercises are being performed properly. 
+
+## Introduction
+The purpose of this project is to use machine learning to assess the quality of execution of weight lifting exercises. This project is based on the data collected by Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H and accessed from 
+http://groupware.les.inf.puc-rio.br/har. To collect the data, six participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the proper execution of the exercise, while the other 4 classes correspond to common mistakes. A set of accelerometers were attached to each subject's arm, forearm, belt and the dumbbell to generate the data used in this project.
+
+```{r echo = FALSE, results='hide', message=FALSE, warning=FALSE}
+#Set up a computing cluster to perform certain computations in parallel on a multi-core machine
+require(doParallel)
+registerDoParallel(makeCluster(3))
+```
+
+##Feature Selection
+
+First, the source data has been read from the provided data files. The data set was split into two parts: a training set, containing 75% of the records in the original data set and a testing set containing the remainder of the records.
+
+```{r, message=FALSE, warning=FALSE}
+#Set a seed for the random number generator state to make these computations reproducible
+set.seed(seed = 1234321)
+
+#Load required libraries
+library(caret)
+
+#Read source data
+sourceData <- read.csv(file = "pml-training.csv")
+
+#Split data into the training and test sets
+inTrain <- createDataPartition(y=sourceData$classe, p=0.75, list=FALSE)
+training <- sourceData[inTrain,]
+testing <- sourceData[-inTrain,]
+
+#Display the dimensions of the training set data frame
+dim(training)
+```
+
+As we can see, the training dataset consistes of 14,718 cases with 160 variables. A summary of this dataset was generated in order to identify potentially meaningful predictors for the machine learning model. Note: the results of the following command are not included in this report (for brevity).
+
+```{r results='hide'}
+summary(training)
+```
+
+Based on the review of the summary output, a large number of variables were found to be either not meaningful for the purpose of predicting the quality of exercise execution, or contained predominantly missing data. These variables were removed from the dataset. Which left us with a dataset containing 52 variables.
+
+```{r}
+training <- training[,c("classe", "roll_belt", "pitch_belt", "yaw_belt", "total_accel_belt", "gyros_belt_x", "gyros_belt_y", "gyros_belt_z", "accel_belt_x", "accel_belt_y", "accel_belt_z", "magnet_belt_x", "magnet_belt_y", "magnet_belt_z", "roll_arm", "pitch_arm", "yaw_arm", "total_accel_arm", "gyros_arm_x", "gyros_arm_y", "gyros_arm_z", "accel_arm_x", "accel_arm_y", "accel_arm_z", "magnet_arm_x", "magnet_arm_y", "magnet_arm_z", "roll_dumbbell", "pitch_dumbbell", "yaw_dumbbell", "gyros_dumbbell_x", "gyros_dumbbell_y", "gyros_dumbbell_z", "accel_dumbbell_x", "accel_dumbbell_y", "accel_dumbbell_z", "magnet_dumbbell_x", "magnet_dumbbell_y", "magnet_dumbbell_z", "roll_forearm", "pitch_forearm", "yaw_forearm", "total_accel_forearm", "gyros_forearm_x", "gyros_forearm_y", "gyros_forearm_z", "accel_forearm_x", "accel_forearm_y", "accel_forearm_z", "magnet_forearm_x", "magnet_forearm_y", "magnet_forearm_z")]
+```
+
+The dataset was further dagnosed to identify near zero variance predictors, which would not be useful for prediction. Note, the outputs of the following command are not displayed.
+```{r results='hide'}
+nzv <- nearZeroVar(training,saveMetrics=TRUE)
+nzv
+```
+This diagnostic revealed that there were no near zero variance variables in the dataset.
+
+##Exploratory Data Analysis
+In order to gain an understanding of the training data, a histogram illustrating the distribution of the outcome variable was constructed.
+
+```{r}
+g <- ggplot(data = training, aes(x=classe)) + geom_histogram(colour="black", fill="#A4DBBE")
+g <- g + labs(title="Frequency Distribution of Exercise Execution Classifications")
+g
+```
+
+Furthermore, a box plot was constructed to review the relationship between the outcome variable and each predictor variable.
+
+```{r}
+#Box Plot of each candidate covariate
+featurePlot(x = training[, -1],
+                  y = training$classe,
+                  plot = "box",
+                  ## Pass in options to bwplot() 
+                  scales = list(y = list(relation="free"),
+                                x = list(rot = 90)),
+                  layout = c(8,7 ),
+                  auto.key = list(columns = 2))
+```
+
+A review of the box plot revealed five predictor variables that appear to have little to no variability across classes of the outcome variable. These covariates were removed from the training dataset.
+```{r}
+training <- training[, !names(training) %in% c("gyros_dumbbell_x","gyros_dumbbell_y","gyros_dumbbell_z","gyros_forearm_y","gyros_forearm_z"), drop = F]
+```
+
+##Pre-processing
+The dataset was further analyzed to identify any highly-correlated covariates that may be redundant for the purpose of training a prediction model. Covariates with a correlation coefficience of 0.9 or higher were considered to be highly correlated. Such predictors were removed from the dataset.
+```{r}
+#Create a data frame to store numeric covariates
+numTraining <- training[,-1]
+
+#Create a correlation matrix of all numeric covariates
+varCor <- cor(numTraining)
+highlyCorVars <- findCorrelation(varCor, cutoff = 0.9)
+
+#List the names of covariates that are highly correlated with each other 
+colnames(numTraining[,highlyCorVars])
+
+#Remove highly-correlated predictors from the dataset
+numTraining <- numTraining[,-highlyCorVars]
+```
+After performing these transformations, the dataset was left with the following predictor variables:
+```{r}
+dim(numTraining)
+colnames(numTraining)
+```
+
+To reduce the number of predictors used for training, a Principal Component Analysis was performed on the dataset to capture 80% of the variance of the original dataset. The principal component analysis produced 12 components.
+```{r echo=FALSE}
+preProc <- preProcess(numTraining, method = "pca", thresh = .80)
+preProc
+#Construct a new data frame containig principal components
+trainPC <- predict(preProc,numTraining)
+```
+
+##Machine Learning
+Since the primary purpose of this project is to develop qualitative predictions of exercise execution, we need a machine learning algorithm that generally produces high prediction accuracy, even if the outputs of the algorithm are not highly interpretable. Furthermore, given the relatively small size of the dataset, even a slower algorithm would be appropriate for this project. I selected Random Forests as the machine learning algorithm that meets these objectives.
+
+One of the potential drawbacks of the Random Forests algorithm is the risk of overfitting the model. To mitigate this risk and improve the estimates of the accuracy of the predictions, a 5-fold cross-validation method was used. 
+```{r, message=FALSE, warning=FALSE}
+fitControl <- trainControl(## 5-fold Cross-Validation
+                           method = "cv",
+                           number = 5)
+```
+
+The prediction model was trained using the methods described above.
+```{r}
+fit <- train(training$classe ~ ., data = trainPC,
+             method = "rf",
+             trControl = fitControl
+            )
+fit
+```
+Accuracy measurement based on the training set was 94% with a standard deviation of 0.3%. Note that due to the relatively small numbe of folds, estimates of the accuracy of the model may be more biased, but are expected to have less variance.
+
+##Model Evaluation
+We can expect the estimate of forecast accuracy calculated on the training set to be overly-optimistic due to the potential for over-fitting and incorporating both the true signal and the noise in the prediction model. Therefore, it is necessary to test the accuracy of the model using the testing data set that was not used in training the model.
+
+```{r}
+#Get a subset of covariates from the testing data that matches the covariates used for training
+numTesting <- testing[,colnames(numTraining)]
+
+#Apply principal component transformation to the testing data set (using the principal components identified on the training data).
+testPC <- predict(preProc,numTesting)
+
+#Predict classes for the test data.
+testing$classePredicted <- predict(fit,testPC) 
+
+#Append a column that indicates whether the prediction was correct
+testing$correctPrediction <- testing$classe==testing$classePredicted
+```
+
+A confusion matrix and a set of prediction accuracy statistics will be used to assess the accuracy of the model on test data that was not used in the training of the model.
+```{r}
+confusionMatrix(data = testing$classePredicted, reference = testing$classe)
+```
+
+As we can see, the estimated acuracy of the model on out-of-sample data is slightly above 95% with a 95% confidence interval for the estimate of accuracy being between 95% and 96%. The estimate of Kappa is 0.94. Estimates of accuracy, sensitivity, specificity, positive predictive value and negative predictive value are consistently above 90% for all of the outcome classes.
+
+##Conclusion
+The summary of model accuracy on out of sample data indicates that it should be possible to use a predictive model based on Random Forests to detect whether weight lifting exercises (Unilateral Dumbbell Biceps Curls) are being performed properly with a relatively high degree of accuracy.
